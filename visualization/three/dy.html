@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WUI 火灾蔓延 3D 动态可视化 (Pro)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #111; font-family: 'Segoe UI', sans-serif; }
+        
+        /* 顶部标题 */
+        #info {
+            position: absolute; top: 10px; width: 100%; text-align: center;
+            color: white; pointer-events: none; text-shadow: 1px 1px 2px black;
+            z-index: 10;
+        }
+        h2 { margin: 5px 0; font-size: 1.5rem; }
+        p { margin: 0; font-size: 0.9rem; opacity: 0.8; }
+
+        /* 底部控制栏 */
+        #controls {
+            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 15px; align-items: center;
+            background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(5px);
+            padding: 12px 20px; border-radius: 12px; color: white;
+            border: 1px solid rgba(255,255,255,0.1);
+            z-index: 10;
+        }
+        button {
+            padding: 8px 16px; background: linear-gradient(135deg, #ff6b35, #ff8c5a);
+            border: none; border-radius: 6px; color: white; cursor: pointer;
+            font-weight: bold; transition: transform 0.1s;
+        }
+        button:hover { transform: scale(1.05); filter: brightness(1.1); }
+        button:active { transform: scale(0.95); }
+        
+        input[type="range"] {
+            width: 200px; accent-color: #ff6b35; cursor: pointer;
+        }
+
+        /* 右下角图例 */
+        #legend {
+            position: absolute; bottom: 20px; right: 20px;
+            background: rgba(0, 0, 0, 0.7); padding: 15px;
+            border-radius: 8px; color: white;
+            border: 1px solid rgba(255,255,255,0.1);
+            z-index: 10;
+            width: 200px;
+        }
+        .legend-title { font-size: 0.9rem; font-weight: bold; margin-bottom: 10px; text-align: center; }
+        .gradient-bar {
+            height: 20px; width: 100%;
+            background: linear-gradient(to right, 
+                #000000 0%, 
+                #ff0000 25%, 
+                #ffa500 50%, 
+                #ffff00 75%, 
+                #ffffff 100%);
+            border-radius: 4px;
+            margin-bottom: 5px;
+            border: 1px solid #555;
+        }
+        .legend-labels {
+            display: flex; justify-content: space-between;
+            font-size: 0.75rem; color: #ccc;
+        }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="info">
+        <h2>🔥 WUI 火灾蔓延 3D 动态模拟</h2>
+        <p>左键旋转 | 右键平移 | 滚轮缩放 | 观察道路阻滞效应</p>
+    </div>
+
+    <div id="controls">
+        <button id="playBtn">▶️ 播放</button>
+        <button id="pauseBtn">⏸️ 暂停</button>
+        <button id="resetBtn">🔄 重置</button>
+        <div style="display:flex; flex-direction:column; align-items:center;">
+            <label style="font-size:0.8rem; margin-bottom:2px;">时间：<span id="timeDisplay">0.00</span>s</label>
+            <input type="range" id="timeSlider" min="0" max="3" step="0.01" value="0">
+        </div>
+    </div>
+
+    <!-- 图例 -->
+    <div id="legend">
+        <div class="legend-title">火到达时间 (秒)</div>
+        <div class="gradient-bar"></div>
+        <div class="legend-labels">
+            <span id="legendMin">0.0s</span>
+            <span id="legendMax">0.0s</span>
+        </div>
+        <div style="font-size: 0.7rem; color: #aaa; margin-top: 5px; text-align: center;">
+            黑色=未燃烧 | 白色=最晚到达
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // --- 全局变量 ---
+        let scene, camera, renderer, controls;
+        let mesh, originalColors, dataVertices;
+        let maxTime = 0, minTime = 0;
+        let currentTime = 0;
+        let isPlaying = false;
+        let particleSystem;
+        let particlesData = []; // 存储每个粒子的状态
+
+        // --- 初始化 ---
+        init();
+        loadData();
+
+        function init() {
+            // 场景
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x111111);
+            scene.fog = new THREE.FogExp2(0x111111, 0.02);
+
+            // 相机
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 12, 18);
+
+            // 渲染器
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            // 控制器
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+
+            // 灯光
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            
+            const dirLight = new THREE.DirectionalLight(0xffaa00, 1.2); // 暖色光更像火光
+            dirLight.position.set(10, 20, 10);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+
+            // 窗口自适应
+            window.addEventListener('resize', onWindowResize);
+            
+            // 启动循环
+            animate();
+        }
+
+        function loadData() {
+            fetch('fire_simulation_data.json')
+                .then(res => res.json())
+                .then(data => {
+                    createFireMap(data);
+                    setupUI(data);
+                })
+                .catch(err => console.error('加载失败:', err));
+        }
+
+        function createFireMap(data) {
+            dataVertices = data.vertices;
+            const resolution = data.resolution;
+            const geometry = new THREE.PlaneGeometry(data.width, data.height, resolution - 1, resolution - 1);
+            
+            const positions = geometry.attributes.position.array;
+            const colors = [];
+            
+            // 1. 计算极值和原始颜色
+            minTime = Infinity; maxTime = 0;
+            dataVertices.forEach(v => {
+                if (v[2] > maxTime) maxTime = v[2];
+                if (v[2] < minTime) minTime = v[2];
+            });
+
+            for (let i = 0; i < dataVertices.length; i++) {
+                const t = dataVertices[i][2];
+                // 设置高度 (Z)
+                positions[i * 3 + 2] = t * 1.5; 
+
+                // 计算颜色映射 (Hot Map)
+                const normT = (t - minTime) / (maxTime - minTime || 1);
+                let r, g, b;
+                if (normT < 0.25) { r = normT * 4; g = 0; b = 0; }
+                else if (normT < 0.5) { r = 1; g = (normT - 0.25) * 4; b = 0; }
+                else if (normT < 0.75) { r = 1; g = 1; b = (normT - 0.5) * 4; }
+                else { r = 1; g = 1; b = 0.5 + (normT - 0.75) * 2; }
+                
+                originalColors = originalColors || [];
+                originalColors.push(r, g, b);
+                colors.push(0, 0, 0); // 初始全黑
+            }
+
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geometry.computeVertexNormals();
+
+            const material = new THREE.MeshStandardMaterial({ 
+                vertexColors: true, roughness: 0.3, metalness: 0.1, side: THREE.DoubleSide
+            });
+
+            mesh = new THREE.Mesh(geometry, material);
+            mesh.rotation.x = -Math.PI / 2; // 修正：PlaneGeometry默认垂直，需旋转躺平
+            // 注意：之前代码没旋转是因为我直接改了Z，但Plane默认法线是Z，面在XY。
+            // 如果我们要让Z轴代表高度（垂直于地面），那么面应该在XY平面。
+            // Three.js PlaneGeometry 默认就是在 XY 平面。所以不需要 rotation.x = -PI/2。
+            // 等等，让我再次确认。
+            // PlaneGeometry(width, height) -> vertices are in XY plane. Z is up.
+            // 所以不需要旋转！之前的代码里如果有 rotation 可能是为了适配特定视角。
+            // 这里我们保持默认，Z就是高度。
+            
+            scene.add(mesh);
+
+            // 添加道路
+            const roadGeo = new THREE.BoxGeometry(2, 0.2, 10);
+            const roadMat = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.8 });
+            const road = new THREE.Mesh(roadGeo, roadMat);
+            road.position.set(5, 0.1, 0); // 稍微抬高一点避免重叠闪烁
+            scene.add(road);
+
+            // 添加起火点
+            const sourceGeo = new THREE.SphereGeometry(0.4, 16, 16);
+            const sourceMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+            const source = new THREE.Mesh(sourceGeo, sourceMat);
+            source.position.set(1, 0.5, 1);
+            scene.add(source);
+
+            // 初始化粒子系统
+            initParticles();
+        }
+
+        // --- 粒子系统逻辑 ---
+        function initParticles() {
+            const particleCount = 800;
+            const geometry = new THREE.BufferGeometry();
+            const positions = [];
+            const colors = [];
+            const sizes = [];
+
+            for (let i = 0; i < particleCount; i++) {
+                positions.push(0, -100, 0); // 初始隐藏在地下
+                colors.push(1, 0.5, 0); // 橙色
+                sizes.push(1);
+                
+                particlesData.push({
+                    velocity: new THREE.Vector3(),
+                    life: 0,
+                    maxLife: 0,
+                    active: false,
+                    pos: new THREE.Vector3()
+                });
+            }
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+
+            // 使用 PointsMaterial，开启大小衰减
+            const material = new THREE.PointsMaterial({
+                size: 0.3,
+                vertexColors: true,
+                transparent: true,
+                opacity: 0.8,
+                sizeAttenuation: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            particleSystem = new THREE.Points(geometry, material);
+            scene.add(particleSystem);
+        }
+
+        function updateParticles(frontTime) {
+            if (!particleSystem) return;
+
+            const positions = particleSystem.geometry.attributes.position.array;
+            const colors = particleSystem.geometry.attributes.color.array;
+            const timeThreshold = frontTime;
+            
+            // 找出当前的“火前锋”顶点 (时间略小于当前时间的点)
+            // 简单策略：随机激活一些时间接近 currentTime 的顶点作为发射源
+            let emitterIndices = [];
+            const tolerance = 0.15; // 时间容差
+
+            for (let i = 0; i < dataVertices.length; i++) {
+                const t = dataVertices[i][2];
+                // 如果这个点刚刚被点燃 (在当前时间附近)，它就可以发射粒子
+                if (t <= timeThreshold && t > timeThreshold - tolerance) {
+                    emitterIndices.push(i);
+                }
+            }
+
+            // 更新每个粒子
+            for (let i = 0; i < particlesData.length; i++) {
+                const p = particlesData[i];
+                
+                // 如果粒子不活跃，尝试从发射源复活
+                if (!p.active && emitterIndices.length > 0 && Math.random() < 0.1) {
+                    const idx = emitterIndices[Math.floor(Math.random() * emitterIndices.length)];
+                    const vx = dataVertices[idx][0];
+                    const vy = dataVertices[idx][1];
+                    const vz = dataVertices[idx][2] * 1.5; // 高度
+
+                    p.pos.set(vx, vz, vy); // 注意坐标映射：Three.js Plane 是 X,Z (Y是高度？不，Plane是XY，Z是高度)
+                    // 修正：PlaneGeometry 在 XY 平面。
+                    // dataVertices: [x, y, t]
+                    // Mesh Position: x, y, t*1.5 (z)
+                    // 所以发射点应该是 (x, y, z)
+                    p.pos.set(dataVertices[idx][0], dataVertices[idx][1], dataVertices[idx][2] * 1.5);
+
+                    // 随机向上喷射速度
+                    p.velocity.set(
+                        (Math.random() - 0.5) * 0.05,
+                        (Math.random() - 0.5) * 0.05,
+                        Math.random() * 0.1 + 0.05 // 向上 (Z轴)
+                    );
+                    p.life = 0;
+                    p.maxLife = Math.random() * 0.5 + 0.3;
+                    p.active = true;
+                }
+
+                if (p.active) {
+                    p.life += 0.016; // 假设 60fps
+                    if (p.life >= p.maxLife) {
+                        p.active = false;
+                        positions[i*3] = 0; positions[i*3+1] = -100; positions[i*3+2] = 0; // 隐藏
+                    } else {
+                        // 更新位置
+                        p.pos.add(p.velocity);
+                        // 重力效果 (Z轴减速)
+                        p.velocity.z -= 0.002; 
+                        
+                        positions[i*3] = p.pos.x;
+                        positions[i*3+1] = p.pos.y;
+                        positions[i*3+2] = p.pos.z;
+
+                        // 颜色随生命周期变淡 (红 -> 黄 -> 透明)
+                        const lifeRatio = p.life / p.maxLife;
+                        colors[i*3] = 1; 
+                        colors[i*3+1] = lifeRatio; 
+                        colors[i*3+2] = 0;
+                    }
+                }
+            }
+
+            particleSystem.geometry.attributes.position.needsUpdate = true;
+            particleSystem.geometry.attributes.color.needsUpdate = true;
+        }
+
+        // --- 核心逻辑：更新地形颜色 ---
+        function updateTerrainColors() {
+            if (!mesh) return;
+            const colors = mesh.geometry.attributes.color.array;
+            
+            for (let i = 0; i < dataVertices.length; i++) {
+                const t = dataVertices[i][2];
+                const idx = i * 3;
+
+                if (t <= currentTime) {
+                    colors[idx] = originalColors[idx];
+                    colors[idx+1] = originalColors[idx+1];
+                    colors[idx+2] = originalColors[idx+2];
+                } else {
+                    colors[idx] = 0; colors[idx+1] = 0; colors[idx+2] = 0;
+                }
+            }
+            mesh.geometry.attributes.color.needsUpdate = true;
+        }
+
+        // --- UI 设置 ---
+        function setupUI(data) {
+            document.getElementById('legendMin').textContent = minTime.toFixed(1) + 's';
+            document.getElementById('legendMax').textContent = maxTime.toFixed(1) + 's';
+            
+            const slider = document.getElementById('timeSlider');
+            slider.max = maxTime;
+            slider.step = maxTime / 100;
+
+            document.getElementById('playBtn').addEventListener('click', () => {
+                if (currentTime >= maxTime) currentTime = 0;
+                isPlaying = true;
+                document.getElementById('playBtn').textContent = '⏸️ 暂停';
+            });
+            document.getElementById('pauseBtn').addEventListener('click', () => {
+                isPlaying = false;
+                document.getElementById('playBtn').textContent = '▶️ 播放';
+            });
+            document.getElementById('resetBtn').addEventListener('click', () => {
+                currentTime = 0;
+                isPlaying = false;
+                document.getElementById('playBtn').textContent = '▶️ 播放';
+                updateTerrainColors();
+                updateParticles(0);
+            });
+            slider.addEventListener('input', (e) => {
+                currentTime = parseFloat(e.target.value);
+                isPlaying = false;
+                document.getElementById('playBtn').textContent = '▶️ 播放';
+                updateTerrainColors();
+                updateParticles(currentTime);
+            });
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- 动画循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (isPlaying) {
+                currentTime += 0.016; // 速度
+                if (currentTime > maxTime) {
+                    currentTime = maxTime;
+                    isPlaying = false;
+                    document.getElementById('playBtn').textContent = '▶️ 播放';
+                }
+                updateTerrainColors();
+                updateParticles(currentTime);
+                
+                // 更新 UI 数值
+                document.getElementById('timeDisplay').textContent = currentTime.toFixed(2);
+                document.getElementById('timeSlider').value = currentTime;
+            }
+
+            // 粒子即使暂停也可以微微飘动（可选），这里选择暂停也停止
+            controls.update();
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
